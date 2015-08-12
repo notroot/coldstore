@@ -1,0 +1,209 @@
+#!/usr/bin/python
+import ConfigParser
+import argparse
+from uuid import uuid1
+from socket import gethostname
+from time import strftime, time
+from datetime import datetime
+import boto
+import os.path
+import sys
+import json
+import hashlib
+import re
+import tarfile
+
+from crypto import encryptFile, decryptFile
+
+
+VERSION = 0.1
+#
+# Parse config file
+#
+home_dir = os.path.expanduser('~')
+
+config_file = "%s/.coldstore/coldstore.cfg" % (home_dir,)
+
+if not os.path.isfile(config_file):
+	sys.exit("Config file expected at ~/.coldstore/coldstore.cfg")
+
+config = ConfigParser.RawConfigParser()
+config.read(config_file)
+
+access_key = config.get('Options', 'access_key')
+secret_key = config.get('Options', 'secret_key')
+target_vault_name = config.get('Options', 'target_vault_name')
+target_bucket_name = config.get('Options', 'target_bucket_name')
+enc_key = config.get('Options', 'encryption_key')
+
+#
+# Parse command line options
+#
+arg_parser = argparse.ArgumentParser(prog="coldstore", description='Utility for archiving files to Amazon Glacier using S3 for metadata tracking')
+arg_parser.add_argument("--config", help="Config file to load", metavar="file")
+arg_parser.add_argument("--skip-encryption", help="Skip encryption for single file", action="store_true")
+
+arg_group = arg_parser.add_mutually_exclusive_group(required=True)
+arg_group.add_argument(
+    "-p", "--put", help="Put directory (as archive) or single file", metavar="/path")
+arg_group.add_argument("-d", "--download", action="store_true", help="Path to get")
+arg_group.add_argument(
+    "-ls", "--list", help="list Vault structure", action="store_true")
+arg_group.add_argument("-i", "--inspect",action="store_true", help="Show details for path")
+
+arg_parser.add_argument("dst", help="Destination path", metavar='/[path]', default="/")
+
+
+args = arg_parser.parse_args()
+
+def sha1File(fpath):
+    sha = hashlib.sha1()
+    with open(fpath, 'rb') as f:
+        while True:
+            chunk = f.read(2**10)
+            if not chunk: break
+            sha.update(chunk)
+        return sha.hexdigest()
+
+# use for generating meta data for single file upload
+def generateFileMetadata(fpath):
+	if not os.path.isfile(fpath):
+		sys.exit("Can't generate metadata on file that doesn't exist: %s" % fpath)
+
+	now_date = strftime("%B %d, %Y %H:%M:%S")
+	fsize = os.path.getsize(fpath)
+	host = gethostname()
+	sha1 = sha1File(fpath)
+
+	meta_data = {'upload_date': now_date,
+				'timestamp': time(),
+				'sha1': sha1,
+				'size': fsize,
+				'host': host,
+				'coldstore_version': VERSION,
+				}
+
+	return meta_data
+
+def inventoryDirectory(path):
+	if not os.path.isdir(path):
+		sys.exit("Can't inventory directory that doesn't exist: %s" % path)
+
+	file_list = []
+	for root, dirs, files in os.walk(path):
+		for fname in files:
+			file_list.append("%s/%s" % (root, fname))
+
+	return file_list
+
+def create_tgz(out, src_path):
+    with tarfile.open(out, "w:gz") as tar:
+        tar.add(src_path, arcname=os.path.basename(src_path))
+
+
+def connect_glacier():
+	glacier_connection = boto.connect_glacier(aws_access_key_id=access_key, aws_secret_access_key=secret_key)
+
+	return glacier_connection
+
+def getVault(glacier_connection):
+	return glacier_connection.get_vault(target_vault_name)
+
+
+def uploadFileGlacier(fpath):
+	if not os.path.isfile(fpath):
+		sys.exit("Can't upload a file that doesn't exist: %s" % file_name)
+
+	#somehow test that things are encrypted
+
+	#archive_id = vault.upload_archive(archive)
+	archive_id = str(uuid1())
+
+	# return the vault uuid or something
+
+	return archive_id
+
+
+def getFile():
+
+	return 0
+
+
+def listArchives():
+
+	return 0
+
+
+def main():
+	if args.put:
+		src = os.path.abspath(args.put)
+		blah ,fname = os.path.split(src)
+		dst = args.dst
+		#print args
+		print "Let's get to uploading %s to %s" % (src, dst)
+
+		if not re.match("^\/.*", dst):
+			sys.exit("Destination must be a path")
+
+		# single file
+		if os.path.isfile(src):
+			print "We've got ourselves a file"
+			#if args.skip-encryption:
+			#	print "Are you sure you want to skip encryption? [y/N]"
+				# actually catch the prompt later
+
+			meta_data = generateFileMetadata(src)
+
+			meta_data['type'] = "file"
+			meta_data['source_path'] = src
+			glacier_id = uploadFileGlacier(src)
+
+
+			meta_data['glacier_id'] = glacier_id
+			meta_data['glacier_vault'] = target_vault_name
+			print json.dumps(meta_data)
+
+			file_dst = "%s/%s" % (dst, fname)
+			print "Gonna put to %s" % file_dst
+			tmp_encrypt = "/tmp/coldstore-%s.enc" % uuid1()
+			encryptFile(src, tmp_encrypt, enc_key)
+			#putArchiveMetadata (file_dst, meta_data, glacier_id)
+
+			os.remove(tmp_encrypt)
+
+		elif os.path.isdir(src):
+			print "O, you're gonna make this hard with a directory"
+			inventory = inventoryDirectory(src)
+
+			tmp_tgz = "/tmp/coldstore-%s.tgz" % uuid1()
+			create_tgz(tmp_tgz, src)
+
+			meta_data = generateFileMetadata(tmp_tgz)
+			meta_data['type'] = "folder"
+			meta_data['source_path'] = src
+			meta_data['inventory'] = inventory
+
+			print json.dumps(meta_data)
+			tmp_encrypt = "%s.enc" % (tmp_tgz)
+			encryptFile(tmp_tgz, tmp_encrypt, enc_key)
+
+		else:
+			print "Cannot locate source %s" % (src)
+			sys.exit(1)
+
+	elif args.get:
+		print "Let's go get some data"
+		#getFile(args.get, vault)
+
+	elif args.list:
+		print "Showing known archives"
+		#listArchives()
+
+	else:
+		print "Not sure what I was supposed to do here ..."
+
+	print "I am all done!"
+
+
+if __name__ == "__main__":
+  main()

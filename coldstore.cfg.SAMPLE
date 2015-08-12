@@ -1,0 +1,6 @@
+[Options]:
+access_key=AWS Access key
+secret_key=AWS Secret Key
+target_vault_name=Glacier Vault for backups
+target_bucket_name=S3 bucket for metadata
+encryption_key=ABCDEFG1234PLEASECHANGEME!
