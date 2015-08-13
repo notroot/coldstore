@@ -5,8 +5,8 @@ from uuid import uuid1
 from socket import gethostname
 from time import strftime, time
 from datetime import datetime
-import boto
 from boto import s3
+from boto import glacier
 import os.path
 import sys
 import json
@@ -19,7 +19,7 @@ from crypto import encryptFile, decryptFile
 
 # globals connections
 s3_conn = None
-glacier_conn = None
+glacier_uploader = None
 
 #
 # Parse config file
@@ -122,9 +122,10 @@ def create_tgz(out, src_path):
 #
 
 def getS3Conn():
+    from boto import connect_s3
     global s3_conn
     if not s3_conn:
-        s3_conn = boto.connect_s3(
+        s3_conn = connect_s3(
             aws_access_key_id = ACCESS_KEY,
             aws_secret_access_key = SECRET_KEY)
 
@@ -193,24 +194,28 @@ def deleteKey(path, bucket_name=TARGET_BUCKET_NAME):
 #
 # Glacier connection logic
 #
-def connect_glacier():
-    glacier_connection = boto.connect_glacier(aws_access_key_id=ACCESS_KEY, aws_secret_access_key=secret_key)
+def getGlacierUploader():
+    from boto.glacier.layer1 import Layer1
+    from boto.glacier.concurrent import ConcurrentUploader
+    global glacier_uploader
+    if not glacier_uploader:
+        layer1 = Layer1(aws_access_key_id=ACCESS_KEY, aws_secret_access_key=SECRET_KEY)
+        glacier_uploader = ConcurrentUploader(layer1, TARGET_VAULT_NAME,32*1024*1024)
 
-    return glacier_connection
-
-def getVault(glacier_connection):
-    return glacier_connection.get_vault(TARGET_VAULT_NAME)
+    return glacier_uploader
 
 
-def uploadFileGlacier(fpath):
+def uploadFileGlacier(fpath, desc):
+    uploader = getGlacierUploader()
+
     if not os.path.isfile(fpath):
         sys.exit("Can't upload a file that doesn't exist: %s" % file_name)
 
     if args.dry_run:
         archive_id = "DRY-RUN"
     else:
-        #archive_id = vault.upload_archive(archive)
-        archive_id = str(uuid1())
+        archive_id = uploader.upload(fpath, desc)
+        #archive_id = str(uuid1())
 
     return archive_id
 
@@ -274,7 +279,7 @@ def main():
                 print "WARNING: Skipping encryption, file should already be encrypted"
                 #actually catch the prompt later
                 meta_data['skipped_encryption'] = "true"
-                glacier_id = uploadFileGlacier(src_path)
+                glacier_id = uploadFileGlacier(src_path, dst)
             elif args.dry_run:
                 meta_data['skipped_encryption'] = "false"
                 glacier_id="DRY-RUN"
@@ -282,7 +287,7 @@ def main():
                 meta_data['skipped_encryption'] = "false"
                 tmp_encrypt = "/tmp/coldstore-%s.enc" % uuid1()
                 encryptFile(src_path, tmp_encrypt, enc_key)
-                glacier_id = uploadFileGlacier(tmp_encrypt)
+                glacier_id = uploadFileGlacier(tmp_encrypt, dst)
                 os.remove(tmp_encrypt)
 
             if not glacier_id:
@@ -341,7 +346,7 @@ def main():
             tmp_encrypt = "%s.enc" % (tmp_tgz)
             encryptFile(tmp_tgz, tmp_encrypt, enc_key)
 
-            glacier_id = uploadFileGlacier(tmp_encrypt)
+            glacier_id = uploadFileGlacier(tmp_encrypt, dst)
 
             meta_data['glacier_id'] = glacier_id
             meta_data['glacier_vault'] = TARGET_VAULT_NAME
