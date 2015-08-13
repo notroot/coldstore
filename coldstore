@@ -34,17 +34,21 @@ if not os.path.isfile(config_file):
 config = ConfigParser.RawConfigParser()
 config.read(config_file)
 
-access_key = config.get('Options', 'access_key')
-secret_key = config.get('Options', 'secret_key')
-target_vault_name = config.get('Options', 'target_vault_name')
-target_bucket_name = config.get('Options', 'target_bucket_name')
+ACCESS_KEY = config.get('Options', 'access_key')
+SECRET_KEY = config.get('Options', 'secret_key')
+TARGET_VAULT_NAME = config.get('Options', 'target_vault_name')
+TARGET_BUCKET_NAME = config.get('Options', 'target_bucket_name')
 enc_key = config.get('Options', 'encryption_key')
+
+if len(enc_key) < 16:
+    sys.exit("Encryption key must be at least 16 characters [recommend 32]")
 
 #
 # Parse command line options
 #
 arg_parser = argparse.ArgumentParser(prog="coldstore", description='Utility for archiving files to Amazon Glacier using S3 for metadata tracking')
 arg_parser.add_argument("--config", help="Config file to load", metavar="file")
+arg_parser.add_argument("--dry-run", help="Dry run, skip uploading", action="store_true")
 arg_parser.add_argument("--skip-encryption", help="Skip encryption for single file", action="store_true")
 arg_parser.add_argument("--replace", help="Replace archive/file if it exists", action="store_true")
 
@@ -61,6 +65,7 @@ arg_parser.add_argument("dst", help="Destination path", metavar='[/path]', defau
 
 
 args = arg_parser.parse_args()
+
 
 def sha1File(fpath):
     sha = hashlib.sha1()
@@ -120,12 +125,12 @@ def getS3Conn():
     global s3_conn
     if not s3_conn:
         s3_conn = boto.connect_s3(
-            aws_access_key_id = access_key,
-            aws_secret_access_key = secret_key)
+            aws_access_key_id = ACCESS_KEY,
+            aws_secret_access_key = SECRET_KEY)
 
     return s3_conn
 
-def checkKeyExists(bucket_name, key):
+def checkKeyExists(key, bucket_name=TARGET_BUCKET_NAME):
     from boto.s3.key import Key
 
     conn = getS3Conn()
@@ -139,7 +144,13 @@ def checkKeyExists(bucket_name, key):
     else:
         return False
 
-def putArchiveMetadata(bucket_name, key, meta_data):
+def putArchiveMetadata(key, meta_data, bucket_name=TARGET_BUCKET_NAME):
+    if args.dry_run:
+        print "Dry run: Upload skipped"
+        print "%s:%s" % (bucket_name, key)
+        print json.dumps(meta_data)
+        return 0
+
     conn = getS3Conn()
     bucket = conn.get_bucket(bucket_name)
 
@@ -149,7 +160,7 @@ def putArchiveMetadata(bucket_name, key, meta_data):
 
     return 0
 
-def getArchiveMetadata(bucket_name, key):
+def getArchiveMetadata(key, bucket_name=TARGET_BUCKET_NAME):
     conn = getS3Conn()
     bucket = conn.get_bucket(bucket_name)
 
@@ -162,7 +173,7 @@ def getArchiveMetadata(bucket_name, key):
 
     return md_json
 
-def listArchives(bucket_name, path=None):
+def listArchives(path=None, bucket_name=TARGET_BUCKET_NAME):
     conn = getS3Conn()
     bucket = conn.get_bucket(bucket_name)
 
@@ -171,7 +182,7 @@ def listArchives(bucket_name, path=None):
 
     return 0
 
-def deleteKey(bucket_name, path):
+def deleteKey(path, bucket_name=TARGET_BUCKET_NAME):
     conn = getS3Conn()
     bucket = conn.get_bucket(bucket_name)
 
@@ -183,22 +194,23 @@ def deleteKey(bucket_name, path):
 # Glacier connection logic
 #
 def connect_glacier():
-    glacier_connection = boto.connect_glacier(aws_access_key_id=access_key, aws_secret_access_key=secret_key)
+    glacier_connection = boto.connect_glacier(aws_access_key_id=ACCESS_KEY, aws_secret_access_key=secret_key)
 
     return glacier_connection
 
 def getVault(glacier_connection):
-    return glacier_connection.get_vault(target_vault_name)
+    return glacier_connection.get_vault(TARGET_VAULT_NAME)
 
 
 def uploadFileGlacier(fpath):
     if not os.path.isfile(fpath):
         sys.exit("Can't upload a file that doesn't exist: %s" % file_name)
 
-    #somehow test that things are encrypted
-
-    #archive_id = vault.upload_archive(archive)
-    archive_id = str(uuid1())
+    if args.dry_run:
+        archive_id = str(uuid1())
+    else:
+        #archive_id = vault.upload_archive(archive)
+        archive_id = str(uuid1())
 
     return archive_id
 
@@ -206,8 +218,13 @@ def getFile():
 
     return 0
 
-def deleteFileGlacier(vault, uuid):
+def deleteFileGlacier(glacier_id, vault=TARGET_VAULT_NAME,):
+    if args.dry_run:
+        print "Dry run: Glacier delete skipped"
+        print "%s:%s" % (vault, glacier_id)
+        return 0
 
+    print "Deleting %s from %s" % (glacier_id, vault)
     return 0
 
 
@@ -216,19 +233,18 @@ def main():
     # Put file or directory
     #
     if args.put:
-        src = os.path.abspath(args.put)
-        blah ,fname = os.path.split(src)
+        src = args.put
         dst = args.dst
-        #print args
-        #print "Let's get to uploading %s to %s" % (src, dst)
 
         if not re.match("^\/.*", dst):
             sys.exit("Destination must be a path")
 
+        src_path = os.path.abspath(src)
         #
         # single file
         #
-        if os.path.isfile(src):
+        if os.path.isfile(src_path):
+            blah ,fname = os.path.split(src_path)
             print "Uploading file %s" % src
 
             if re.match('.*\/$', dst):
@@ -237,33 +253,32 @@ def main():
                 #file_dst = "%s/%s" % (dst, fname)
                 file_dst = dst
 
-            print "Gonna put to %s" % file_dst
+            print "Destination path: %s" % file_dst
 
             # check for existing metadata indicating path exists
-            if checkKeyExists(target_bucket_name, file_dst):
+            if checkKeyExists(file_dst):
                 if not args.replace:
                     sys.exit("Key already exists, to replace rerun with --replace")
                 else:
-                    md_json = getArchiveMetadata(target_bucket_name, file_dst)
+                    md_json = getArchiveMetadata(file_dst)
                     metadata = json.loads(md_json)
                     glacier_id = metadata['glacier_id']
                     glacier_vault = metadata['glacier_vault']
-                    print "Deleting %s from %s" % (glacier_id, glacier_vault)
-                    deleteFileGlacier(glacier_vault, glacier_id)
+                    deleteFileGlacier(glacier_id, glacier_vault)
 
-            meta_data = generateFileMetadata(src)
+            meta_data = generateFileMetadata(src_path)
             meta_data['type'] = "file"
-            meta_data['source_path'] = src
+            meta_data['source_path'] = src_path
 
             if args.skip_encryption:
                 print "WARNING: Skipping encryption, file should already be encrypted"
                 #actually catch the prompt later
                 meta_data['skipped_encryption'] = "true"
-                glacier_id = uploadFileGlacier(src)
+                glacier_id = uploadFileGlacier(src_path)
             else:
                 meta_data['skipped_encryption'] = "false"
                 tmp_encrypt = "/tmp/coldstore-%s.enc" % uuid1()
-                encryptFile(src, tmp_encrypt, enc_key)
+                encryptFile(src_path, tmp_encrypt, enc_key)
                 glacier_id = uploadFileGlacier(tmp_encrypt)
                 os.remove(tmp_encrypt)
 
@@ -271,46 +286,51 @@ def main():
                 sys.exit("Glacier upload failed!")
 
             meta_data['glacier_id'] = glacier_id
-            meta_data['glacier_vault'] = target_vault_name
+            meta_data['glacier_vault'] = TARGET_VAULT_NAME
 
-            print json.dumps(meta_data)
-            putArchiveMetadata (target_bucket_name, file_dst, meta_data)
+            #print json.dumps(meta_data)
+            putArchiveMetadata (file_dst, meta_data)
 
         #
         # Directory - creates tgz of folder and encrypts it before unlpoading
         #
-        elif os.path.isdir(src):
+        elif os.path.isdir(src_path):
             print "O, you're gonna make this hard with a directory"
 
             # if dst ends in a / then append source path into folder,
             # else just use destination as
-            if re.match(".*\/$", dst):
-                dst = "%s%s" % (dst, args.put)
+            if re.match(".*\/$", dst) and not re.match(".*\/$", src):
+                folder = os.path.basename(src)
+                dst = "%s%s" % (dst, folder)
 
             # since its a folder, it has to end in / to indicate that
             if not re.match(".*\/$", dst):
                 dst = "%s/" % dst
 
+
+            #expand to full path
+            src_path = os.path.abspath(src)
+            print "Uploading to %s" % dst
+
             # check for existing metadata indicating path exists
-            if checkKeyExists(target_bucket_name, dst):
+            if checkKeyExists(dst):
                 if not args.replace:
                     sys.exit("Key already exists, to replace rerun with --replace")
                 else:
-                    md_json = getArchiveMetadata(target_bucket_name, file_dst)
+                    md_json = getArchiveMetadata(file_dst)
                     metadata = json.loads(md_json)
                     glacier_id = metadata['glacier_id']
                     glacier_vault = metadata['glacier_vault']
-                    print "Deleting %s from %s" % (glacier_id, glacier_vault)
-                    deleteFileGlacier(glacier_vault, glacier_id)
+                    deleteFileGlacier(glacier_id, glacier_vault)
 
-            inventory = inventoryDirectory(src)
+            inventory = inventoryDirectory(src_path)
 
             tmp_tgz = "/tmp/coldstore-%s.tgz" % uuid1()
-            create_tgz(tmp_tgz, src)
+            create_tgz(tmp_tgz, src_path)
 
             meta_data = generateFileMetadata(tmp_tgz)
             meta_data['type'] = "folder"
-            meta_data['source_path'] = src
+            meta_data['source_path'] = src_path
             meta_data['inventory'] = inventory
 
             tmp_encrypt = "%s.enc" % (tmp_tgz)
@@ -319,7 +339,7 @@ def main():
             glacier_id = uploadFileGlacier(tmp_encrypt)
 
             meta_data['glacier_id'] = glacier_id
-            meta_data['glacier_vault'] = target_vault_name
+            meta_data['glacier_vault'] = TARGET_VAULT_NAME
 
             os.remove(tmp_tgz)
             os.remove(tmp_encrypt)
@@ -328,12 +348,13 @@ def main():
                 sys.exit("Glacier upload failed!")
 
             #print json.dumps(meta_data)
-            putArchiveMetadata(target_bucket_name, dst, meta_data)
+            putArchiveMetadata(dst, meta_data)
 
         # path for put doesn't exist
         else:
             sys.exit("Cannot locate source %s" % (src))
 
+        print "Success"
 
     elif args.download:
         print "Let's go get some data"
@@ -345,7 +366,7 @@ def main():
         if re.match('^/.*', dst):
             dst = dst[1:]
 
-        listArchives(target_bucket_name, dst)
+        listArchives(dst)
 
     elif args.inspect:
         print "Inspect"
@@ -355,7 +376,7 @@ def main():
 
         #print key
 
-        md_json = getArchiveMetadata(target_bucket_name, key)
+        md_json = getArchiveMetadata(key)
 
         if md_json:
             pprint(json.loads(md_json))
@@ -363,29 +384,27 @@ def main():
             sys.exit("Key does not exists, sorry")
 
     elif args.delete:
-        print "Delete"
         key = args.dst
+        print "Delete %s" % key
         if key == "/":
             sys.exit("Can't delete /")
 
         if re.match('^/.*', key):
             key = key[1:]
 
-        md_json = getArchiveMetadata(target_bucket_name, key)
+        md_json = getArchiveMetadata(key)
         if md_json:
             metadata = json.loads(md_json)
             glacier_id = metadata['glacier_id']
             glacier_vault = metadata['glacier_vault']
-            print "Deleting %s from %s" % (glacier_id, glacier_vault)
-            deleteFileGlacier(glacier_vault, glacier_id)
-            deleteKey(target_bucket_name, key)
+            deleteFileGlacier(glacier_id, glacier_vault)
+            deleteKey(key)
         else:
             sys.exit("Unkown key")
 
 
     else:
         sys.exit("Not sure what I was supposed to do here ...")
-
 
 if __name__ == "__main__":
   main()
