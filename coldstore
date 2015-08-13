@@ -147,8 +147,8 @@ def checkKeyExists(key, bucket_name=TARGET_BUCKET_NAME):
 def putArchiveMetadata(key, meta_data, bucket_name=TARGET_BUCKET_NAME):
     if args.dry_run:
         print "Dry run: Upload skipped"
-        print "%s:%s" % (bucket_name, key)
-        print json.dumps(meta_data)
+        print " - S3 Metadata: %s:%s" % (bucket_name, key)
+        pprint(meta_data, depth=1)
         return 0
 
     conn = getS3Conn()
@@ -207,7 +207,7 @@ def uploadFileGlacier(fpath):
         sys.exit("Can't upload a file that doesn't exist: %s" % file_name)
 
     if args.dry_run:
-        archive_id = str(uuid1())
+        archive_id = "DRY-RUN"
     else:
         #archive_id = vault.upload_archive(archive)
         archive_id = str(uuid1())
@@ -221,7 +221,7 @@ def getFile():
 def deleteFileGlacier(glacier_id, vault=TARGET_VAULT_NAME,):
     if args.dry_run:
         print "Dry run: Glacier delete skipped"
-        print "%s:%s" % (vault, glacier_id)
+        print " - Glacier archive: %s:%s" % (vault, glacier_id)
         return 0
 
     print "Deleting %s from %s" % (glacier_id, vault)
@@ -259,7 +259,7 @@ def main():
             if checkKeyExists(file_dst):
                 if not args.replace:
                     sys.exit("Key already exists, to replace rerun with --replace")
-                else:
+                elif args.replace:
                     md_json = getArchiveMetadata(file_dst)
                     metadata = json.loads(md_json)
                     glacier_id = metadata['glacier_id']
@@ -275,6 +275,9 @@ def main():
                 #actually catch the prompt later
                 meta_data['skipped_encryption'] = "true"
                 glacier_id = uploadFileGlacier(src_path)
+            elif args.dry_run:
+                meta_data['skipped_encryption'] = "false"
+                glacier_id="DRY-RUN"
             else:
                 meta_data['skipped_encryption'] = "false"
                 tmp_encrypt = "/tmp/coldstore-%s.enc" % uuid1()
@@ -295,8 +298,6 @@ def main():
         # Directory - creates tgz of folder and encrypts it before unlpoading
         #
         elif os.path.isdir(src_path):
-            print "O, you're gonna make this hard with a directory"
-
             # if dst ends in a / then append source path into folder,
             # else just use destination as
             if re.match(".*\/$", dst) and not re.match(".*\/$", src):
@@ -310,7 +311,11 @@ def main():
 
             #expand to full path
             src_path = os.path.abspath(src)
-            print "Uploading to %s" % dst
+            print "Uploading archive of %s to %s" % (src, dst)
+
+            if args.dry_run:
+                print("Dry run, exiting")
+                return 0
 
             # check for existing metadata indicating path exists
             if checkKeyExists(dst):
